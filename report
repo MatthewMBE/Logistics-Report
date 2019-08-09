@@ -1,0 +1,243 @@
+import pandas as pd
+import plotly_express as px
+from pandas import *
+import matplotlib.pyplot as plt
+import plotly.graph_objs as go
+import plotly.plotly as py
+import plotly.io
+from plotly.offline import download_plotlyjs, init_notebook_mode, plot, iplot
+# Initialize notebook for offline mode so it doesnt call plotly API
+init_notebook_mode(connected = True)
+
+file_path = '//SEDCFW138002.US138.CORPINTRA.NET/D147/Public/_Departments/MBXTRA_General/Report_Automation/Logistics_Report/'
+# importing parts data
+
+parts_data = pd.read_excel(file_path + 'Import_Data.xlsx', sheet_name = 'PARTS_DATA')
+parts_data = parts_data.drop(columns = ['Item', 'Release No.', 'Deletion indicator', '(Auto) Unloading Point',
+                                       'Release Creation Profile', 'Plant', 'GR processing time (sched. line)',
+                                       'Short Text', 'Order Unit', 'Gross Weight', 'MRP Area', 'Storage location', 
+                                       'Weight unit', 'Planning Calendar', 'Lot Sizing Procedure', 'GR processing time (MRP)',
+                                       'Rounding value', 'Cum. Received Qty', 'Release Transmission Date', 'Last D. Note No.',
+                                       'Last GR Quantity', 'Date of Last GR', 'Target quantity', 'Base Unit of Measure', 
+                                       'Load carrier', 'Vendor', 'Purchasing Group', 'Search Term', 'Country', 'Carrier', 'Carriername', 
+                                       'Loading Group'])
+parts_data.rename(columns = {'Name' : 'Supplier', 'Goods Supplier' : 'Supplier Code'}, inplace=True)
+
+
+# importing Transit Time
+transit_time = pd.read_excel(file_path + 'Import_Data.xlsx', sheet_name = 'Transit_Time')
+transit_time.reset_index()
+transit_time = transit_time.drop(columns = ['Supplier'])
+
+
+# importing and prepping eket data (QuantityS)
+
+test_eket = pd.read_excel(file_path + 'Import_Data.xlsx', sheet_name = 'EKET')
+test_eket = test_eket.drop(columns = ['Item', 'Schedule Line', 'Quantity delivered'])
+test_eket.rename(columns={'Scheduled Quantity' : 'QuantityS', 'Delivery date' : 'Date'}, inplace = True)
+
+eket = pd.merge(test_eket, parts_data, on = 'Purchasing Document')
+eket = eket.drop(columns = ['Purchasing Document'])
+eket['CW'] = eket['Date'].dt.week
+df_eket_part_sum = eket
+
+
+# importing and prepping ekes data (QuantityD)
+
+test_ekes = pd.read_excel(file_path + 'Import_Data.xlsx', sheet_name = 'EKES')
+test_ekes = test_ekes.drop(columns = ['Item', 'Sequential Number', 'Confirm. Category', 'Deliv. Date Category', 'Time-Spot',
+                                     'Delivery Date', 'Creation Time', 'Qty Reduced (MRP)', 'Creation indicator', 
+                                     'Deletion Indicator', 'MRP-Relevant', 'Reference', 'Delivery', 'Item.1', 'Mfr part profile',
+                                     'No. Rem./Expediters', 'Batch', 'HigherLevelItemBatch', 'Sequential Number.1', 'In Plant',
+                                      'Delivery.1', 'Item.2', 'Handover Date', 'Handover Time', 'Stock Segment',
+                                      'CW Qty in Order Confirmation', 'CW MRP Reduced Quantity', 'Data Filter Value for Data Aging',
+                                      'Allocated Stock Quantity', 'Original Quantity'])
+test_ekes.rename(columns = {'MPN material' : 'Material', 'Quantity' : 'QuantityD', 'Creation Date' : 'Date'}, inplace = True)
+
+ekes = pd.merge(test_ekes, parts_data, on = 'Purchasing Document')
+ekes = ekes.drop(columns = ['Material_y'])
+ekes = ekes.rename(columns = {'Material_x' : 'Material'})
+ekes = ekes.drop(columns = ['Purchasing Document'])
+ekes = pd.merge(ekes, transit_time, on = 'Supplier Code')
+ekes['Date'] = pd.to_datetime(ekes['Date'])
+
+index = 0 
+for ind in ekes.index:
+    date = ekes.loc[index, 'Date']
+    temp = ekes.loc[index, 'Transit Time']
+    new_date = date + pd.offsets.BDay(temp)
+    ekes.at[index, 'New Date'] = new_date
+    index = index + 1
+ekes = ekes.drop(columns = ['Date'])
+ekes = ekes.rename(columns = {'New Date' : 'Date'})
+ekes['CW'] = ekes['Date'].dt.week
+ekes = ekes.drop(columns = ['Transit Time'])
+df_ekes_part_sum = ekes
+
+
+#check 1
+
+# sorting df by supplier, cw, material, and date
+frames_eket = [df_eket_part_sum, df_ekes_part_sum]
+result_df = pd.concat(frames_eket, sort=True)
+result_df.QuantityD = result_df.QuantityD.fillna(0)
+result_df.QuantityS = result_df.QuantityS.fillna(0)
+grouped_date_df = result_df.groupby(['Supplier', 'Supplier Code', 'CW', 'Material', 'Date']).sum().reset_index()
+
+supplier_data = grouped_date_df.copy()
+supplier_data = supplier_data.rename(columns={'QuantityD' : 'Quantity_Delivered', 'QuantityS' : 'Quantity_Scheduled'})
+
+grouped_date_df.loc[grouped_date_df['QuantityS'] == grouped_date_df['QuantityD'], 'Part Indicator'] = 1
+grouped_date_df.loc[grouped_date_df['QuantityS'] > grouped_date_df['QuantityD'], 'Part Indicator'] = 0
+grouped_date_df.loc[grouped_date_df['QuantityS'] < grouped_date_df['QuantityD'], 'Part Indicator'] = 1
+
+grouped_date_df_count = grouped_date_df.groupby(by = ['Supplier', 'Supplier Code', 'CW', 'Material']).count().reset_index()
+grouped_date_df_count.rename(columns = {'Date': 'Material_Shipments'}, inplace = True)
+grouped_date_df_count = grouped_date_df_count[['Supplier', 'Supplier Code', 'CW', 'Material', 'Material_Shipments']]
+
+grouped_date_df_sum = grouped_date_df.groupby(by = ['Supplier','Supplier Code', 'CW','Material','Part Indicator']).sum().reset_index()
+grouped_date_df_sum = grouped_date_df_sum[['Supplier', 'Supplier Code', 'CW', 'Material', 'Part Indicator']]
+grouped_date_df_sum.rename(columns = {'Part Indicator': 'Ontime/Early_Deliveries'}, inplace = True)
+grouped_date_df_sum['Ontime/Early_Deliveries'] = grouped_date_df_sum['Ontime/Early_Deliveries'].astype(int)
+
+grouped_date_df_merge = grouped_date_df_count.merge(grouped_date_df_sum, how = 'left', on = ['Supplier', 'Supplier Code',
+                                                                                             'CW', 'Material'])
+grouped_date_df_merge['Ontime %'] = grouped_date_df_merge['Ontime/Early_Deliveries']/grouped_date_df_merge['Material_Shipments'] * 100
+grouped_date_df_merge['Ontime %'] = grouped_date_df_merge['Ontime %'].astype(int)
+grouped_date_df_merge
+
+
+# Finalize Report df with all info to export
+
+check_one = grouped_date_df_merge
+Fcheck_one = check_one.groupby(by = ['Supplier', 'Supplier Code', 'CW']).mean().reset_index()
+Fcheck_one = Fcheck_one.drop(columns = ['Material_Shipments', 'Ontime/Early_Deliveries'])
+
+# seperating grouped_date_df_merge by supplier to export
+
+# sorting suppliers dfs
+def sortC1_by_supplier(supplier_name):
+    df = grouped_date_df_merge.loc[grouped_date_df_merge['Supplier'] == supplier_name]
+    return df
+
+#American Mitsuba Corporation
+americanC1 = sortC1_by_supplier('American Mitsuba Corporation')
+
+#Aptiv Services US, LLC
+aptivC1 = sortC1_by_supplier('Aptiv Services US, LLC')
+
+#CJ Automotive Indiana LLC
+CJC1 = sortC1_by_supplier('CJ Automotive Indiana LLC')
+
+#Continental Automotive
+continentalC1 = sortC1_by_supplier('Continental Automotive')
+
+#GS Yuasa Energy Solutions, Inc
+gsC1 = sortC1_by_supplier('GS Yuasa Energy Solutions, Inc')
+
+#Gentex Corporation
+gentexC1 = sortC1_by_supplier('Gentex Corporation')
+
+#Hutchinson Antivibration
+hutchinsonC1 = sortC1_by_supplier('Hutchinson Antivibration')
+
+#Joyson Safety Systems
+joysonC1 = sortC1_by_supplier('Joyson Safety Systems')
+
+#Modine Manufacturing Company
+modineC1 = sortC1_by_supplier('Modine Manufacturing Company')
+
+
+# exporting all check one dfs 
+writer = pd.ExcelWriter(file_path + 'OnTime_Report.xlsx')
+Fcheck_one.to_excel(writer, 'Report')
+americanC1.to_excel(writer, 'American')
+aptivC1.to_excel(writer, 'Aptiv')
+CJC1.to_excel(writer, 'CJ')
+continentalC1.to_excel(writer, 'Continental')
+gsC1.to_excel(writer, 'GS')
+gentexC1.to_excel(writer, 'Gentex')
+hutchinsonC1.to_excel(writer, 'Hutchinson')
+joysonC1.to_excel(writer, 'Joyson')
+modineC1.to_excel(writer, 'Modine')
+writer.save()
+
+
+#merging dfs for check 2
+
+frames_eket = [eket, ekes]
+check_two = pd.concat(frames_eket, sort=True)
+check_two.QuantityD = check_two.QuantityD.fillna(0)
+check_two.QuantityS = check_two.QuantityS.fillna(0)
+
+
+# 'indicator' fucntion
+
+def indicator_func(df):
+    df.loc[df['Ontime %'] > 100, 'Indicator'] = "Over Shipped"
+    df.loc[df['Ontime %'] == 100, 'Indicator'] = "Ontime Shipment"
+    df.loc[df['Ontime %'] < 100, 'Indicator'] = "Under Shipped"
+    df.loc[df['QuantityS'] == 0, 'Indicator'] = 'No Shipments Scheduled'
+    return df
+        
+# 2nd ontime check
+
+check_two = check_two.groupby(['Supplier', 'Supplier Code', 'CW', 'Material']).sum().reset_index()
+check_two['Ontime %'] = ((check_two['QuantityD'])/check_two['QuantityS'])*100  
+check_two = indicator_func(check_two)
+check_two.loc[check_two['Ontime %'] > 100, 'Ontime %'] = 100
+Echeck_two = check_two
+check_two.drop(columns=['Indicator'])
+check_two = check_two.groupby(['Supplier', 'Supplier Code', 'CW']).mean().reset_index()
+check_two = indicator_func(check_two)
+check_two = check_two.drop(columns = ['QuantityD', 'QuantityS'])
+check_two['Ontime %'] = check_two['Ontime %'].astype(int)
+
+
+# sorting suppliers dfs
+
+def sortC2_by_supplier(supplier_name):
+    df = Echeck_two.loc[Echeck_two['Supplier'] == supplier_name]
+    return df
+
+#American Mitsuba Corporation
+americanC2 = sortC2_by_supplier('American Mitsuba Corporation')
+
+#Aptiv Services US, LLC
+aptivC2 = sortC2_by_supplier('Aptiv Services US, LLC')
+
+#CJ Automotive Indiana LLC
+CJC2 = sortC2_by_supplier('CJ Automotive Indiana LLC')
+
+#Continental Automotive
+continentalC2 = sortC2_by_supplier('Continental Automotive')
+
+#GS Yuasa Energy Solutions, Inc
+gsC2 = sortC2_by_supplier('GS Yuasa Energy Solutions, Inc')
+
+#Gentex Corporation
+gentexC2 = sortC2_by_supplier('Gentex Corporation')
+
+#Hutchinson Antivibration
+hutchinsonC2 = sortC2_by_supplier('Hutchinson Antivibration')
+
+#Joyson Safety Systems
+joysonC2 = sortC2_by_supplier('Joyson Safety Systems')
+
+#Modine Manufacturing Company
+modineC2 = sortC2_by_supplier('Modine Manufacturing Company')
+
+
+# exporting all dfs
+writer = pd.ExcelWriter(file_path + 'New_Check.xlsx')
+check_two.to_excel(writer, 'Report')
+americanC2.to_excel(writer, 'American')
+aptivC2.to_excel(writer, 'Aptiv')
+CJC2.to_excel(writer, 'CJ')
+continentalC2.to_excel(writer, 'Continental')
+gsC2.to_excel(writer, 'GS')
+gentexC2.to_excel(writer, 'Gentex')
+hutchinsonC2.to_excel(writer, 'Hutchinson')
+joysonC2.to_excel(writer, 'Joyson')
+modineC2.to_excel(writer, 'Modine')
+writer.save()
